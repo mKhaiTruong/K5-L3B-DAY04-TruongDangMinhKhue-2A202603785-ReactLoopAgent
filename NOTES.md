@@ -90,3 +90,49 @@ Nguyên nhân có thể là:
 - Cải tiến:
   - completed và URL có mặt trong câu trả lời chỉ chứng minh agent đã dẫn nguồn, không chứng minh mọi nhận định đều đúng.
   - Gate tốn thêm model calls: thêm 2 step cho mỗi case có link.
+
+## Bonus
+
+- Cấu hình: openai / gpt-4o-mini, judge cùng model, max_steps 16, dataset bonus.
+  Baseline chạy lại với cùng cấu hình (code ở commit 056d850) để so sánh công bằng.
+- Kết quả: 68.0 → 64.3 (bonus 10.2 → 9.64/15). Vi phạm mechanical: 2 → 1.
+
+### Lỗi đã chọn và bằng chứng (baseline)
+
+- B10: Vercel trả RATE_LIMITED ở step 1, model trả lời luôn ở step 2.
+  Vi phạm "Cần gọi get_vercel_status ít nhất 2 lần" (bị chặn ở 50).
+- B6: chỉ gọi get_vercel_status(component="Builds") và get_npm_status(component="package publishing"),
+  không đọc chi tiết incident. Vi phạm "Chưa gọi tool cần thiết: get_incident_details".
+- B3: có retry nhưng câu trả lời không nhắc lỗi 429 hay việc đã retry.
+
+### Thay đổi
+
+- Refactor các kiểm tra thành class Gate (observe/check) và chạy theo thứ tự (Chain of Responsibility).
+- RateLimitGate: lần gọi gần nhất bị 429 (retriable) và tool mới gọi dưới 3 lần
+  → ghi validation_unretried_rate_limit, nhắc retry 1 lần.
+- IncidentDetailGate (chỉ bật cho toolset bonus): đã lọc status theo component, có incident
+  mà chưa đọc chi tiết incident mới nhất → ghi validation_unread_incident_details, nhắc 1 lần.
+- TOOLSET_PROMPT_EXTRA nối vào system_prompt của bonus: 429 không phải outage, nêu số lần retry,
+  captured_at từng provider, đọc chi tiết khi cần scope/timeline.
+- Bài chính giữ nguyên SYSTEM_PROMPT và hành vi (test test_main_lab_prompt_and_timeout_unchanged,
+  test_gate_disabled_for_main_lab).
+
+### Kết quả
+
+- B6: 50 → 78, hết vi phạm. Trace có validation_unread_incident_details, sau đó model đọc chi tiết.
+- B10: hết vi phạm min_calls. Gate nhắc ở step 2, retry Vercel thành công ở step 3.
+  Điểm vẫn 45 vì judge chê nội dung (thiếu nguồn từng provider): lỗi Reason, gate không sửa được.
+- Lỗi mới / còn lại:
+  - B4 80 → 50: model tự gọi get_vercel_status 4 lần (2 lần song song ở step 3),
+    vi phạm "Vượt 3 lần". Gate không chặn được call của model; chặn trong loop phải bỏ
+    hoặc đổi event của tool call trong trace, vi phạm contract trace nên không làm.
+  - B9 (40): câu hỏi về Linear/Slack (không có tool), model vẫn gọi cả 5 status tool rồi liệt kê.
+    Có thể do câu "nêu captured_at từng provider" trong prompt bổ sung; chưa xác nhận.
+
+### Giới hạn
+
+- Judge = gpt-4o-mini, chấm không ổn định: B1 65 → 95, B7 50 → 25 dù không gate nào chạy.
+  Với 10 case, chênh lệch 68.0 → 64.3 nằm trong mức nhiễu, không kết luận được.
+- Chưa chờ theo Retry-After khi gặp HTTP 429 thật (429 giả lập có retry_after_seconds = 0).
+- Pagination (next_offset) vẫn phụ thuộc model, không có gate.
+- IncidentDetailGate chỉ kích hoạt khi status có lọc theo component.
